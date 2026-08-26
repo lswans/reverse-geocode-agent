@@ -22,21 +22,35 @@ This app is built with five components:
 - **FastAPI** for the Python web server, which routes both local and outgoing API requests.
 - **MapLibre GL JS** for rendering the interactive map in the browser, embedded directly in HTML.
 
-The data flow looks like this:
+A typical session goes like this:
 
-browser (MapLibre)  --click lat/lon-->  FastAPI  -->  Strands Agent
-       ^             --follow-up Q-->   session       |- reverse_geocode    (Location Places)
-       |                                             |- find_nearby_places (Location Places)
-       |                                             |- search_wikipedia   (Wikipedia)
-       '--- SSE: tool steps, then report or text ---  |- read_web_page      (the place's site)
+1. Press **Follow me** and grant browser location access, or click a place you want to explore.
+2. The map follows each fresh device fix immediately while the agent analyzes only meaningful movement.
+3. The agent identifies the nearest notable place and sends back a report.
+4. Ask follow-up questions about what's there, how tall it is, what's nearby, or what it costs.
+5. Stop tracking or click elsewhere whenever you're ready to explore another location.
+
+The data flow behind each of those steps looks like this:
+
+```text
+browser Geolocation --every fresh fix--> MapLibre live marker + accuracy + trail
+          |
+          '--meaningful movement--\
+browser map click ---------------+--> FastAPI --> Strands Agent
+browser follow-up question -------'    session     |- reverse_geocode    (Location Places)
+       ^                                        |- find_nearby_places (Location Places)
+       |                                        |- search_wikipedia   (Wikipedia)
+       |                                        |- read_web_page      (the place's site)
+       '-- POST SSE: steps, report, or text ----|- search_web         (capped fallback)
 
   basemap tiles: Amazon Location Maps, via an API key served by /api/map-config
+```
 
-The agent picks its own path. ReverseGeocode returns only the single closest match. Click the Empire State Building and the closest match is a sightseeing-tour listing four meters away, so the agent calls SearchNearby, sees "Empire State Building" under a Tourist Attraction category eighteen metres out, and reports that instead. Click open ocean and it gets nothing back from either call, says so in one sentence, and offers no link.
+The browser never waits for Bedrock to move the live marker. It coalesces movement while an agent turn is running and sends only the latest eligible point after that turn finishes. The agent then picks its own tool path. `ReverseGeocode` returns only the single closest match, so the agent also calls `SearchNearby` to avoid confidently naming a side entrance or nearby tour operator instead of the landmark the user meant.
 
-The first turn is validated against a PlaceReport Pydantic model, so the UI never parses free text.
+The first turn is validated against a `PlaceReport` Pydantic model, so the UI never parses free text.
 
-## Section 2: Build the App
+## Section 2: Clone the App
 
 Now that we know what we’re building, lets get the app running on your machine.
 
@@ -46,62 +60,71 @@ Now that we know what we’re building, lets get the app running on your machine
 - An AWS account
 - The AWS CLI installed and configured
 
-No infrastructure will be provisioned. This is a script you run on your own machine; it calls Bedrock and Amazon Location's APIs, so your account is billed per request, not per hour. Total cost of following this whole guide and executing the whole click-and-chat workflow will be about a fraction of a cent.
+No infrastructure will be provisioned. This is a script you run on your own machine; it calls Bedrock and Amazon Location's APIs, so your account is billed per request, not per hour. Total cost of following this whole guide and executing the whole click-and-chat workflow will be about a fraction of a cent.
 
 ### Setup
 
 First, run the commands below in your terminal. This will clone the repo from GitLab, create a virtual environment for Python's config for this project, and install dependencies.
 
-git clone <https://gitlab.aws.dev/luswanso/Reverse-Geocode-Agent#>
+```bash
+git clone https://gitlab.aws.dev/luswanso/Reverse-Geocode-Agent
 cd reverse-geocode-agent
 python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+```
 
 Next, configure your AWS credentials in the AWS CLI:
 
+```bash
 aws configure
 aws sts get-caller-identity     # confirms it worked
+```
 
-Enable Bedrock model access in the Bedrock console under **Model access** > **Manage model access**. Turn on a Claude model (the default is us.anthropic.claude-haiku-4-5-20251001-v1:0). This is a one-time, per-account, per-region setting. Skipping it produces an access-denied error on your first click that looks like a credentials problem but isn't.
+Enable Bedrock model access in the Bedrock console under **Model access** > **Manage model access**. Turn on a Claude model (the default is `us.anthropic.claude-haiku-4-5-20251001-v1:0`). This is a one-time, per-account, per-region setting. Skipping it produces an access-denied error on your first click that looks like a credentials problem but isn't.
 
 ### Required IAM Permissions
 
 | Service | Used for | Actions |
 | --- | --- | --- |
-| Bedrock | The agent's model | bedrock:InvokeModelWithResponseStream |
-| Location Places | Reverse geocoding and nearby search | geo-places:ReverseGeocode, geo-places:SearchNearby |
-| Location | Creating and reading the basemap key | geo:CreateKey, geo:DescribeKey, geo:DeleteKey |
+| Bedrock | The agent's model | `bedrock:InvokeModelWithResponseStream` |
+| Location Places | Reverse geocoding and nearby search | `geo-places:ReverseGeocode`, `geo-places:SearchNearby` |
+| Location | Creating and reading the basemap key | `geo:CreateKey`, `geo:DescribeKey`, `geo:DeleteKey` |
 
 ### Create the Basemap API Key
 
-Run the create_map_key.py file:
+Run the `create_map_key.py` file:
 
+```bash
 .venv/bin/python create_map_key.py
+```
 
-This creates a key named map-click-agent-demo-maps, restricted to geo-maps:* (map rendering only, it cannot run place searches), expiring automatically in 90 days. The server fetches it by name at runtime with its own credentials and hands it to the browser through /api/map-config, so no credential is baked into index.html.
+This creates a key named `map-click-agent-demo-maps`, restricted to `geo-maps:*` (map rendering only, it cannot run place searches), expiring automatically in 90 days. The server fetches it by name at runtime with its own credentials and hands it to the browser through `/api/map-config`, so no credential is baked into `index.html`.
 
 ### Optional Environment Overrides
 
+```bash
 export AWS_REGION="us-east-1"
 export MODEL_ID="us.anthropic.claude-haiku-4-5-20251001-v1:0"
 export MAP_STYLE="Standard"        # Monochrome, Hybrid, Satellite
 export MAP_COLOR_SCHEME="Dark"     # Light
 export PORT="8000"
+```
 
 ## Section 3: The Code
 
-Now, let's review the files that build the app. Three files carry the application logic. Here's what each one does and how to run it.
+Now, let's review the files that build the app. Three files carry the application logic. Here's what each one does and how to run it.
 
 ### agent.py
 
-This file contains the Strands agent, its four tools, the system prompt, and the PlaceReport Pydantic schema that structures the first-turn output.
+This file contains the Strands agent, its five tools, the system prompt, and the `PlaceReport` Pydantic schema that structures the first-turn output.
 
-The four tools:
+The five tools:
 
-- **reverse_geocode** calls Amazon Location's ReverseGeocode API to identify the closest place to a given lat/lon.
-- **find_nearby_places** calls SearchNearby to get surrounding points of interest when the closest match isn't the most relevant one.
+- **reverse_geocode** calls Amazon Location's `ReverseGeocode` API to identify the closest place to a given lat/lon.
+- **find_nearby_places** calls `SearchNearby` to get surrounding points of interest when the closest match isn't the most relevant one.
 - **search_wikipedia** fetches Wikipedia summaries for landmarks and historical context.
-- **read_web_page** fetches a place's own website for prices, hours, or menus. It only accepts URLs that earlier tool output provided, and page text is passed to the model labelled as untrusted information rather than instructions.
+- **read_web_page** fetches a specific website for prices, hours, or menus. It only accepts URLs that earlier tool output provided, and page text is passed to the model labelled as untrusted information rather than instructions.
+- **search_web** is a last resort: an open web search the agent reaches for only after the other four have failed to surface a URL it needs, for example a transit station's fare page that Places and Wikipedia never link to. It's capped at two calls per conversation, enforced in code rather than left to the model's judgment, since an unbounded search tool is the one tool here whose cost isn't predictable per call.
 
 The agent decides which tools to call and in what order. Every tool degrades to an error message the agent works around rather than crashing, so a throttled or failed lookup makes the summary vaguer instead of breaking the session.
 
@@ -109,59 +132,66 @@ In the UI, the outcome of the agent executing is as follows:
 
 Run the agent standalone (no web layer), including one follow-up:
 
+```bash
 .venv/bin/python agent.py
+```
 
 ### server.py
 
-This is the FastAPI web server. It handles session management, map configuration, streaming endpoints, and static file hosting.
+This is the FastAPI web server. It handles passcode authentication, session management, map configuration, streaming endpoints, and static file hosting.
 
 Key behaviors:
 
-- Dropping a pin creates a session holding a Strands Agent with its own history. Follow-ups build on the tool results from the first turn instead of starting cold.
-- Dropping a new pin discards the previous session. The browser clears the transcript, the server replaces the agent, and any question aimed at the old session gets a 409.
-- There is exactly one live session at a time.
-- Tool calls stream to the UI as Server-Sent Events, so the agent's reasoning steps are visible in real time.
+- Dropping a pin or analyzing a live GPS fix creates a session holding a Strands Agent with its own history. Follow-ups build on the tool results from that report.
+- Each analyzed location creates an independently addressable session. Selecting another location changes the browser's active conversation without invalidating another user's session.
+- The process retains a bounded maximum of 100 recent sessions and evicts the oldest first.
+- Tool calls stream to the UI as Server-Sent Events over a `fetch()` POST response.
+- Coordinates, questions, and passcodes are carried in request bodies or headers, never API URLs.
 
 The API endpoints:
 
 | Endpoint | Behaviour |
 | --- | --- |
-| GET /api/map-config | Region, style, colour scheme, and the maps API key |
-| GET /api/describe/stream?latitude=&longitude= | New pin. SSE step per tool call, then report with {session_id, report} |
-| GET /api/ask/stream?session_id=&question= | Follow-up. SSE step and delta text chunks, then done. 409 if the pin was replaced |
-| POST /api/describe | Non-streaming first turn, returns {session_id, report} |
+| `GET /api/map-config` | Region, style, colour scheme, and the maps API key |
+| `POST /api/describe/stream` | JSON `{latitude, longitude}`; starts a session and streams tool steps plus a report |
+| `POST /api/ask/stream` | JSON `{session_id, question}`; streams a follow-up answer |
+| `POST /api/describe` | Non-streaming first turn, returns `{session_id, report}` |
 
 Run the server:
 
+```bash
 .venv/bin/python server.py
+```
 
-Then open [http://127.0.0.1:8000](http://127.0.0.1:8000/), click the map, and ask follow-ups. The first turn takes roughly 6 to 10 seconds; follow-ups land in 2 to 4 depending on whether the agent reaches for a tool.
+Then open [http://127.0.0.1:8000](http://127.0.0.1:8000/), choose **Follow me** or click the map, and ask follow-ups. The first report takes roughly 6 to 10 seconds; follow-ups land in 2 to 4 depending on whether the agent reaches for a tool.
 
-The server binds to 0.0.0.0 and has no authentication. That is fine locally, but it should not be exposed to a network as-is. The maps key it serves is restricted to geo-maps, so it cannot be used to run place searches on your account.
+The server binds to `127.0.0.1` by default. The deployed version uses a passcode stored in SSM Parameter Store and CloudFront HTTPS. The maps key remains restricted to `geo-maps`, so it cannot run place searches on your account.
+
+### Live location behavior
+
+**Follow me** uses `navigator.geolocation.watchPosition()` with high-accuracy mode enabled. Every fresh GPS fix moves the MapLibre marker and accuracy circle immediately in the browser. Agent reports are intentionally slower and less frequent: the first fix must be accurate to roughly 75 metres, then a refresh requires at least 50 metres of meaningful movement and 15 seconds since the previous analysis. If the agent is busy, only the newest eligible fix is retained.
+
+**Describe here now** bypasses the movement and time thresholds when the current fix is usable. **Stop tracking** calls `clearWatch()` and leaves the last location visible. GPS fixes and the bounded 100-point trail remain in browser memory only; only coordinates selected for analysis are sent to the server.
+
+On Windows, use Chromium DevTools **Sensors** to simulate locations and routes. On iPhone, open the deployed CloudFront HTTPS URL in Safari and grant location access after pressing **Follow me**. Safari provides foreground tracking, but it can suspend updates when the tab is backgrounded or the screen locks. This web version does not claim background tracking.
 
 ### check_map.py
 
-A diagnostic script that verifies the browser's map rendering path end to end. Run it if tiles are not appearing:
+A diagnostic script verifies the browser's map rendering path end to end. Run it if tiles are not appearing:
 
+```bash
 .venv/bin/python check_map.py
+```
 
-It checks:
-
-- CDN assets are reachable
-- The /api/map-config endpoint returns valid configuration
-- The style descriptor loads
-- A sample tile fetches successfully
-- Sprites and glyphs resolve
-
-If any of these fail, the map won't render in the browser, and this script tells you which link in the chain broke.
+It checks CDN assets, authenticated map configuration, the style descriptor, a sample tile, sprites, and glyphs.
 
 ## Section 4: Conversation Lifecycle
 
-The session model is simple. Dropping a pin creates a session. Follow-ups build on the tool results from the first turn: ask "how tall is it" and the agent reaches for Wikipedia, ask "what else is nearby" and it reuses the place data it already has, ask "what does it cost" and it reads the website that the place data handed it.
+Explore mode preserves the original behavior: clicking a pin starts a conversation, and follow-ups reuse that location's tool results. Follow mode starts a new conversation whenever meaningful movement produces another report. A GPS fix received while an agent turn is running is coalesced rather than interrupting that turn.
 
-That last behavior only happens on follow-ups, never during the first report, and only for things a place publishes itself: prices, hours, tickets, menus. The agent may only fetch URLs that earlier tool output gave it. read_web_page refuses anything that is not a public web address, and page text is passed to the model labelled as untrusted information.
+Questions about prices, hours, tickets, or menus still use the place's own website only when the user asks. The agent may fetch only public URLs supplied by earlier tool output, and page content is treated as untrusted information.
 
-Dropping a new pin discards the session entirely. One session at a time is all a single-presenter demo needs.
+Clicking the map exits Follow mode. Starting Follow mode clears the explored pin and requests location permission from an explicit button press. Sessions are isolated by unguessable IDs so separate viewers do not replace one another's active conversation; the in-memory store remains intentionally bounded for this demo.
 
 ## Section 5: Cleanup
 
@@ -169,19 +199,23 @@ The only persistent resource this project creates in your AWS account is the API
 
 To remove the API key:
 
+```bash
 aws location delete-key --key-name map-click-agent-demo-maps
+```
 
 Or leave it alone. An expired key stops working on its own and cannot be revived, so there's no ongoing risk in forgetting about it.
 
 To confirm nothing else is left:
 
+```bash
 aws location list-keys
+```
 
 Any key you don't recognize by name is not something this project created.
 
 ## What's Next
 
-This post covered the reverse-geocoding agent: clicking a map, identifying a place, and asking follow-up questions grounded in real tool output. The agent picks its own path through four tools, structures its first response with a Pydantic model, and streams its reasoning to the browser in real time.
+This post covered the reverse-geocoding agent: clicking a map, identifying a place, and asking follow-up questions grounded in real tool output. The agent picks its own path through five tools, falling back to open web search only when the others come up empty, structures its first response with a Pydantic model, and streams its reasoning to the browser in real time.
 
 In Part 2, we'll extend this foundation with forward geocoding (searching for places by name), route planning between pins, and isochrone visualization to show reachable areas within a given travel time. Same stack, same single-file deployment model, more spatial capability.
 

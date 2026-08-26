@@ -1,12 +1,16 @@
-"""Verify the browser's map path: CDN assets, config endpoint, style, one tile."""
+"""Verify the authenticated browser map path end to end."""
 
+import os
 import re
 
 import httpx
 
-# A missing CDN version returns a 404 as text/plain, which the browser refuses to
-# run and which shows up only as a black map, so check the URLs the page asks for.
-page = httpx.get("http://127.0.0.1:8000/", timeout=30)
+BASE = os.getenv("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+PASSCODE = os.environ.get("DEMO_PASSCODE", "")
+if not PASSCODE:
+    raise SystemExit("Set DEMO_PASSCODE before running this script")
+
+page = httpx.get(f"{BASE}/", timeout=30)
 page.raise_for_status()
 for url in re.findall(r'https://cdn\.jsdelivr\.net/[^"\']+', page.text):
     asset = httpx.get(url, timeout=30, follow_redirects=True)
@@ -15,11 +19,15 @@ for url in re.findall(r'https://cdn\.jsdelivr\.net/[^"\']+', page.text):
     status = "ok" if asset.is_success and kind == expected else f"BAD ({kind})"
     print(f"{status:16} {asset.status_code} {url}")
 
-config = httpx.get("http://127.0.0.1:8000/api/map-config", timeout=60)
+config = httpx.get(
+    f"{BASE}/api/map-config",
+    headers={"X-Demo-Passcode": PASSCODE},
+    timeout=60,
+)
 print(f"GET /api/map-config -> {config.status_code}")
 config.raise_for_status()
 data = config.json()
-print({k: (v[:14] + "..." if k == "api_key" else v) for k, v in data.items()})
+print({key: (value[:14] + "..." if key == "api_key" else value) for key, value in data.items()})
 
 style_url = (
     f"https://maps.geo.{data['region']}.amazonaws.com/v2/styles/{data['style']}"

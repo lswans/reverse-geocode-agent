@@ -4,6 +4,9 @@ venv/
 __pycache__/
 *.pyc
 
+# Build output
+.aws-sam/
+
 # Local config and secrets
 .env
 *.log
@@ -13,3 +16,8 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Per-account deploy session logs (account IDs, IAM principals, SCP IDs). Local only.
+DEPLOY-HANDOFF.md
+DEPLOYMENT-FAILURE-POSTMORTEM.md
+DIRECT-DEPLOY-RESULT.md

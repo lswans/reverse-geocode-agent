@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Passcode-protected map click agent demo
+
+Parameters:
+  AgentImageUri:
+    Type: String
+    Description: Full Amazon ECR image URI for the Lambda container
+  AgentModule:
+    Type: String
+    Default: agent_stub
+    AllowedValues: [agent_stub, agent]
+  MapKeyName:
+    Type: String
+    Default: map-click-agent-demo-maps
+  PasscodeParameterName:
+    Type: String
+    Default: /map-click-agent/passcode
+  ModelId:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+Conditions:
+  UseRealAgent: !Equals [!Ref AgentModule, agent]
+
+Resources:
+  AgentFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerContext: .
+      Dockerfile: Dockerfile
+      DockerTag: python3.12-v1
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref AgentImageUri
+      Architectures: [x86_64]
+      MemorySize: 1024
+      Timeout: 60
+      ReservedConcurrentExecutions: 1
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+      Environment:
+        Variables:
+          AWS_LWA_INVOKE_MODE: RESPONSE_STREAM
+          HOST: 0.0.0.0
+          PORT: '8080'
+          AGENT_MODULE: !Ref AgentModule
+          ALS_KEY_NAME: !Ref MapKeyName
+          PASSCODE_PARAM_NAME: !Ref PasscodeParameterName
+          MODEL_ID: !Ref ModelId
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: geo:DescribeKey
+              Resource: !Sub arn:${AWS::Partition}:geo:${AWS::Region}:${AWS::AccountId}:key/${MapKeyName}
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PasscodeParameterName}
+        - !If
+          - UseRealAgent
+          - Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - geo-places:ReverseGeocode
+                  - geo-places:SearchNearby
+                Resource: '*'
+              - Effect: Allow
+                Action: bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-*
+          - !Ref AWS::NoValue
+
+  StaticBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  StaticOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-s3-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: StaticS3Origin
+            DomainName: !GetAtt StaticBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt StaticOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: LambdaFunctionUrlOrigin
+            DomainName: !Select [2, !Split ['/', !GetAtt AgentFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+        DefaultCacheBehavior:
+          TargetOriginId: StaticS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: LambdaFunctionUrlOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            Compress: false
+
+  StaticBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${StaticBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
+Outputs:
+  CloudFrontUrl:
+    Description: Passcode-protected demo URL
+    Value: !Sub https://${FrontendDistribution.DomainName}
+  StaticBucketName:
+    Description: Bucket to receive the contents of static/
+    Value: !Ref StaticBucket
+  DistributionId:
+    Description: CloudFront distribution ID for invalidations
+    Value: !Ref FrontendDistribution
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref AgentFunction
+  FunctionUrl:
+    Description: Direct backend URL; use CloudFront for the demo
+    Value: !GetAtt AgentFunctionUrl.FunctionUrl

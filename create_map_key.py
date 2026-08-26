@@ -1,7 +1,7 @@
-"""One-off helper: create the maps-only Amazon Location API key for this demo.
+"""Create or reuse the maps-only Amazon Location API key for this demo.
 
-Run once, then put the printed key in ALS_API_KEY. Delete the key when you are
-done with it:  aws location delete-key --key-name map-click-agent-demo-maps
+The key value is intentionally not printed. The deployed server retrieves it by
+name with its execution role.
 """
 
 import datetime
@@ -37,4 +37,3 @@ except ClientError as exc:
 described = client.describe_key(KeyName=KEY_NAME)
 print(f"region:  {REGION}")
 print(f"expires: {described['ExpireTime']:%Y-%m-%d}")
-print(f"key:     {described['Key']}")

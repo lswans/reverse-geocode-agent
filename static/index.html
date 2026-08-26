@@ -3,59 +3,94 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Map Click Agent</title>
+<title>Map Location Agent</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.css" />
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --bg: #10131a;
+    --panel: #171b24;
+    --surface: #1e242f;
+    --border: #2b3342;
+    --text: #e8ecf3;
+    --muted: #8b95a8;
+    --blue: #6cb2ff;
+    --green: #7fd1b9;
+    --red: #ff8f8f;
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: #10131a;
-    color: #e8ecf3;
+    background: var(--bg);
+    color: var(--text);
     height: 100vh;
-    display: flex;
   }
-  #map { flex: 1; height: 100%; }
-  #map canvas { cursor: crosshair; }
-
-  /* MapLibre chrome, toned down to match the panel */
-  .maplibregl-ctrl-group { background: #1e242f; border: 1px solid #2b3342; }
-  .maplibregl-ctrl-group button + button { border-top-color: #2b3342; }
-  .maplibregl-ctrl-icon { filter: invert(1) hue-rotate(180deg); }
-  .maplibregl-ctrl-attrib {
-    background: rgba(16, 19, 26, .8) !important;
-    color: #8b95a8;
-  }
-  .maplibregl-ctrl-attrib a { color: #8b95a8; }
-  .maplibregl-popup-content {
-    background: #1e242f;
-    color: #e8ecf3;
-    border: 1px solid #2b3342;
-    border-radius: 8px;
-    padding: 8px 12px;
+  button, textarea, input { font: inherit; }
+  button {
+    min-height: 44px;
+    padding: 0 16px;
+    border-radius: 9px;
+    border: 1px solid #35618f;
+    background: #1d3a5c;
+    color: var(--text);
     font-weight: 600;
+    cursor: pointer;
   }
-  .maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: #2b3342; }
-  .maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: #2b3342; }
-  .maplibregl-popup-close-button { color: #8b95a8; font-size: 16px; }
+  button.secondary { background: #242b37; border-color: #3b4658; }
+  button:hover:not(:disabled) { background: #24486e; }
+  button.secondary:hover:not(:disabled) { background: #303949; }
+  button:focus-visible, textarea:focus-visible, input:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
+  button:disabled, textarea:disabled { opacity: .45; cursor: not-allowed; }
+  [hidden] { display: none !important; }
+  #app { width: 100%; height: 100%; display: flex; }
+  #map { flex: 1; height: 100%; min-width: 0; }
+  #map canvas { cursor: crosshair; }
   aside {
     width: 420px;
     height: 100%;
-    padding: 26px;
-    background: #171b24;
+    padding: 24px;
+    background: var(--panel);
     border-left: 1px solid #262c39;
     display: flex;
     flex-direction: column;
     gap: 14px;
   }
-  h1 { font-size: 17px; margin: 0 0 4px; letter-spacing: .2px; }
-  .hint { color: #8b95a8; font-size: 13px; margin: 0; }
+  h1 { font-size: 18px; margin: 0 0 5px; letter-spacing: .2px; }
   header { flex: none; }
-  #panel { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 4px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 0; }
+  .tracking-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .tracking-controls button { flex: 1 1 auto; }
+  .control-help {
+    display: block;
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  #location-status {
+    display: block;
+    margin-top: 6px;
+    min-height: 22px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  #location-status[data-tone="good"] { color: var(--green); }
+  #location-status[data-tone="poor"] { color: #ffd27f; }
+  #location-status[data-tone="error"] { color: var(--red); }
+  #panel {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-right: 4px;
+  }
   .card {
-    background: #1e242f;
-    border: 1px solid #2b3342;
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 10px;
     padding: 18px;
   }
@@ -64,10 +99,10 @@
   .coords {
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 13px;
-    color: #7fd1b9;
+    color: var(--green);
     margin: 0 0 12px;
   }
-  a { color: #6cb2ff; }
+  a { color: var(--blue); }
   .eyebrow {
     text-transform: uppercase;
     letter-spacing: .08em;
@@ -75,15 +110,13 @@
     color: #6f7b90;
     margin: 0 0 10px;
   }
-
   .steps { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
   .steps li { display: flex; align-items: center; gap: 10px; padding: 3px 0; color: #98a3b6; }
-  .steps li.active { color: #e8ecf3; }
+  .steps li.active { color: var(--text); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #3c4657; flex: none; }
-  .steps li.done .dot { background: #7fd1b9; }
-  .steps li.active .dot { background: #6cb2ff; animation: pulse 1s ease-in-out infinite; }
+  .steps li.done .dot { background: var(--green); }
+  .steps li.active .dot { background: var(--blue); animation: pulse 1s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .3; } }
-
   .turn { display: flex; flex-direction: column; gap: 8px; }
   .bubble { border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; }
   .bubble.you {
@@ -92,16 +125,19 @@
     align-self: flex-end;
     max-width: 88%;
   }
-  .bubble.agent { background: #1e242f; border: 1px solid #2b3342; color: #cfd6e2; }
+  .bubble.agent { background: var(--surface); border: 1px solid var(--border); color: #cfd6e2; }
   .bubble.agent:empty::after { content: "…"; color: #6f7b90; }
   .who { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #6f7b90; }
   .you-row { display: flex; justify-content: flex-end; }
-  .error { color: #ff8f8f; margin: 0; }
-
-  form { flex: none; display: flex; gap: 8px; align-items: flex-end; }
+  .error { color: var(--red); margin: 0; }
+  #ask { flex: none; display: flex; gap: 8px; align-items: flex-end; }
   label.sr {
-    position: absolute; width: 1px; height: 1px; overflow: hidden;
-    clip: rect(0 0 0 0); white-space: nowrap;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   textarea {
     flex: 1;
@@ -111,302 +147,115 @@
     border-radius: 9px;
     border: 1px solid #2f3949;
     background: #131822;
-    color: #e8ecf3;
-    font: inherit;
+    color: var(--text);
   }
-  textarea:focus-visible, button:focus-visible { outline: 2px solid #6cb2ff; outline-offset: 1px; }
-  textarea:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
-  button {
-    height: 44px;
-    padding: 0 16px;
-    border-radius: 9px;
-    border: 1px solid #35618f;
-    background: #1d3a5c;
-    color: #e8ecf3;
-    font: inherit;
+  .maplibregl-ctrl-group { background: var(--surface); border: 1px solid var(--border); }
+  .maplibregl-ctrl-group button + button { border-top-color: var(--border); }
+  .maplibregl-ctrl-icon { filter: invert(1) hue-rotate(180deg); }
+  .maplibregl-ctrl-attrib { background: rgba(16, 19, 26, .8) !important; color: var(--muted); }
+  .maplibregl-ctrl-attrib a { color: var(--muted); }
+  .maplibregl-popup-content {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
     font-weight: 600;
-    cursor: pointer;
   }
-  button:hover:not(:disabled) { background: #24486e; }
+  .maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: var(--border); }
+  .maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: var(--border); }
+  .maplibregl-popup-close-button { color: var(--muted); font-size: 16px; }
+  .device-marker {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--green);
+    border: 3px solid white;
+    box-shadow: 0 0 0 7px rgba(127, 209, 185, .24), 0 2px 8px rgba(0, 0, 0, .4);
+  }
+  #gate {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: grid;
+    place-items: center;
+    background: var(--bg);
+  }
+  .gate-card {
+    width: min(380px, calc(100vw - 32px));
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 26px;
+  }
+  .gate-card h1 { font-size: 21px; margin-bottom: 8px; }
+  .gate-instruction { margin-top: 10px; }
+  .gate-card form { margin-top: 18px; display: flex; align-items: stretch; flex-direction: column; gap: 8px; }
+  .gate-card input {
+    height: 44px;
+    padding: 0 12px;
+    border-radius: 9px;
+    border: 1px solid #2f3949;
+    background: #131822;
+    color: var(--text);
+  }
+  #gate-error { min-height: 24px; margin: 8px 0 0; }
+  @media (max-width: 720px) {
+    #app { flex-direction: column; }
+    #map { flex: none; width: 100%; height: 46vh; min-height: 260px; }
+    aside {
+      width: 100%;
+      height: 54vh;
+      min-height: 340px;
+      padding: 16px;
+      border-left: 0;
+      border-top: 1px solid #262c39;
+    }
+    .tracking-controls { margin-top: 12px; }
+    #panel { min-height: 80px; }
+  }
 </style>
 </head>
 <body>
-  <div id="map" role="application" aria-label="Click the map to describe a location"></div>
+  <section id="gate" aria-labelledby="gate-title">
+    <div class="gate-card">
+      <h1 id="gate-title">Map Location Agent</h1>
+      <p class="hint">Explore any spot on the map and get an AI-written description of the place.</p>
+      <p class="hint gate-instruction">Enter the demo passcode to begin.</p>
+      <form id="unlock">
+        <label for="passcode">Passcode</label>
+        <input id="passcode" name="passcode" type="password" required autocomplete="current-password" />
+        <button type="submit" id="unlock-button">Unlock map</button>
+      </form>
+      <p id="gate-error" class="error" role="alert"></p>
+    </div>
+  </section>
 
-  <aside>
-    <header>
-      <h1>Map Click Agent</h1>
-      <p class="hint">Click the map to drop a pin, then ask follow-up questions about it. A new pin starts over.</p>
-    </header>
-
-    <div id="panel" aria-live="polite"></div>
-
-    <form id="ask">
-      <label class="sr" for="question">Ask a follow-up question about the pinned location</label>
-      <textarea id="question" placeholder="Drop a pin first…" disabled
-                autocomplete="off" enterkeyhint="send"></textarea>
-      <button type="submit" id="send" disabled>Ask</button>
-    </form>
-  </aside>
+  <main id="app" hidden>
+    <div id="map" role="application" aria-label="Map showing a selected or live location"></div>
+    <aside>
+      <header>
+        <h1>Map Location Agent</h1>
+        <p class="hint">Follow your live location or click anywhere on the map to explore. Only locations selected for analysis are sent to the agent.</p>
+        <div class="tracking-controls" aria-label="Location tracking controls">
+          <button type="button" id="follow-location" aria-describedby="follow-help" disabled>Follow my location</button>
+          <button type="button" id="stop-location" class="secondary" hidden>Stop tracking</button>
+          <button type="button" id="describe-location" class="secondary" disabled>Describe here now</button>
+          <button type="button" id="recenter-location" class="secondary" hidden>Recenter</button>
+        </div>
+        <span id="follow-help" class="control-help">Uses your device's GPS while this page is open.</span>
+        <span id="location-status" role="status" aria-live="polite">Explore mode</span>
+      </header>
+      <div id="panel" aria-live="polite"></div>
+      <form id="ask">
+        <label class="sr" for="question">Ask a follow-up question about the current location</label>
+        <textarea id="question" placeholder="Tap the map or follow your location to start…" disabled autocomplete="off" enterkeyhint="send"></textarea>
+        <button type="submit" id="send" disabled>Ask</button>
+      </form>
+    </aside>
+  </main>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
-<script>
-  const panel = document.getElementById('panel');
-  const form = document.getElementById('ask');
-  const questionBox = document.getElementById('question');
-  const sendButton = document.getElementById('send');
-
-  let map = null;
-  let marker = null;
-  let source = null;       // the one live EventSource
-  let sessionId = null;    // the pin the server is holding a conversation for
-  let busy = false;
-
-  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-  const scrollDown = () => { panel.scrollTop = panel.scrollHeight; };
-
-  function setBusy(value) {
-    busy = value;
-    const ready = sessionId !== null && !busy;
-    questionBox.disabled = !ready;
-    sendButton.disabled = !ready;
-    questionBox.placeholder = sessionId === null
-      ? 'Drop a pin first…'
-      : busy ? 'Agent is working…' : 'Ask about this place…';
-  }
-
-  function closeStream() {
-    if (source) { source.close(); source = null; }
-  }
-
-  // Shared plumbing: open an SSE stream and route its frames.
-  function openStream(url, { onStep, onDelta, onReport, onDone }) {
-    closeStream();
-    setBusy(true);
-    source = new EventSource(url);
-    let started = false;
-
-    source.addEventListener('step', (ev) => { started = true; onStep(JSON.parse(ev.data).label); });
-    source.addEventListener('delta', (ev) => { started = true; onDelta(JSON.parse(ev.data).text); });
-
-    source.addEventListener('report', (ev) => {
-      const payload = JSON.parse(ev.data);
-      closeStream();
-      setBusy(false);
-      onReport(payload);
-    });
-
-    source.addEventListener('done', () => { closeStream(); setBusy(false); onDone?.(); });
-
-    source.addEventListener('failed', (ev) => {
-      closeStream();
-      setBusy(false);
-      showError(JSON.parse(ev.data).detail);
-    });
-
-    source.onerror = () => {
-      closeStream();
-      setBusy(false);
-      // A stream that never started usually means the request was rejected,
-      // for example asking about a pin the server has already replaced.
-      showError(started
-        ? 'Lost connection to the agent partway through. Try again.'
-        : 'The agent did not start. Drop a new pin, and check the server is running.');
-    };
-  }
-
-  // --- Amazon Location basemap --------------------------------------------
-  // The region, style, and API key come from the server so no credential is
-  // baked into this page.
-  (async function initMap() {
-    let config;
-    try {
-      const res = await fetch('/api/map-config');
-      if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-      config = await res.json();
-    } catch (err) {
-      showError(`Could not load the map: ${err.message}`);
-      return;
-    }
-
-    const styleUrl = `https://maps.geo.${config.region}.amazonaws.com/v2/styles/`
-      + `${config.style}/descriptor?key=${config.api_key}&color-scheme=${config.color_scheme}`;
-
-    map = new maplibregl.Map({
-      container: 'map',
-      style: styleUrl,
-      center: [-73.9665, 40.7812],   // MapLibre takes [lng, lat]
-      zoom: 13,
-      validateStyle: false
-    });
-
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
-    map.on('click', onMapClick);
-    map.on('error', (e) => console.error('map error', e && e.error));
-  })();
-
-  // --- new pin: wipe the conversation and start over -----------------------
-  function onMapClick(e) {
-    const { lat, lng } = e.lngLat;
-
-    closeStream();
-    sessionId = null;
-    panel.replaceChildren();      // the previous conversation is gone
-    questionBox.value = '';
-
-    if (marker) marker.remove();
-    marker = new maplibregl.Marker({ color: '#6cb2ff' }).setLngLat([lng, lat]).addTo(map);
-
-    const progress = addProgressCard(`Working on ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-
-    openStream(`/api/describe/stream?latitude=${lat}&longitude=${lng}`, {
-      onStep: progress.step,
-      onDelta: () => {},
-      onReport: ({ session_id, report }) => {
-        sessionId = session_id;
-        progress.card.remove();
-        addReportCard(report);
-        setBusy(false);
-        questionBox.focus();
-      }
-    });
-  }
-
-  // --- follow-up question about the current pin ----------------------------
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const question = questionBox.value.trim();
-    if (!question || !sessionId || busy) return;
-
-    questionBox.value = '';
-    addYourTurn(question);
-    const turn = addAgentTurn();
-
-    openStream(`/api/ask/stream?session_id=${encodeURIComponent(sessionId)}&question=${encodeURIComponent(question)}`, {
-      onStep: turn.step,
-      onDelta: turn.text,
-      onDone: () => { turn.finish(); questionBox.focus(); }
-    });
-  });
-
-  questionBox.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
-  });
-
-  // --- rendering helpers ---------------------------------------------------
-  function addProgressCard(title) {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `<p class="eyebrow">${esc(title)}</p><ul class="steps">
-      <li class="active"><span class="dot"></span>Waking the agent up</li></ul>`;
-    panel.append(card);
-    scrollDown();
-
-    const list = card.querySelector('.steps');
-    const labels = [];
-    return {
-      card,
-      step(label) {
-        labels.push(label);
-        list.innerHTML = labels.map((text, i) =>
-          `<li class="${i === labels.length - 1 ? 'active' : 'done'}"><span class="dot"></span>${esc(text)}</li>`
-        ).join('');
-        scrollDown();
-      }
-    };
-  }
-
-  function addReportCard(r) {
-    const link = r.link
-      ? `<a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link_title || r.link)} &rarr;</a>`
-      : '<span class="hint">No relevant link found.</span>';
-
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `
-      <p class="label">${esc(r.label)}</p>
-      <p class="summary">${esc(r.summary)}</p>
-      <p class="coords">${r.latitude.toFixed(5)}, ${r.longitude.toFixed(5)}</p>
-      ${link}`;
-    panel.append(card);
-    scrollDown();
-
-    if (marker) {
-      marker.setPopup(new maplibregl.Popup({ offset: 28 }).setText(r.label)).togglePopup();
-    }
-  }
-
-  function addYourTurn(question) {
-    const row = document.createElement('div');
-    row.className = 'you-row';
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble you';
-    bubble.textContent = question;
-    row.append(bubble);
-    panel.append(row);
-    scrollDown();
-  }
-
-  // An answer can be text, then a tool call, then more text. Render the pieces
-  // in the order they arrive so the agent's mid-answer detours are visible.
-  function addAgentTurn() {
-    const turn = document.createElement('div');
-    turn.className = 'turn';
-    const who = document.createElement('span');
-    who.className = 'who';
-    who.textContent = 'Agent';
-    turn.append(who);
-
-    const waiting = document.createElement('div');
-    waiting.className = 'bubble agent';
-    turn.append(waiting);
-    panel.append(turn);
-    scrollDown();
-
-    let bubble = null;   // the text block currently being streamed into
-    let spinner = null;  // the step line currently marked active
-
-    const settle = () => { spinner?.classList.replace('active', 'done'); spinner = null; };
-
-    return {
-      step(label) {
-        waiting.remove();
-        settle();
-        bubble = null;
-        const list = document.createElement('ul');
-        list.className = 'steps';
-        list.innerHTML = `<li class="active"><span class="dot"></span>${esc(label)}</li>`;
-        spinner = list.firstElementChild;
-        turn.append(list);
-        scrollDown();
-      },
-      text(chunk) {
-        waiting.remove();
-        settle();
-        if (!bubble) {
-          bubble = document.createElement('div');
-          bubble.className = 'bubble agent';
-          turn.append(bubble);
-        }
-        bubble.textContent += chunk;
-        scrollDown();
-      },
-      finish() {
-        waiting.remove();
-        settle();
-      }
-    };
-  }
-
-  function showError(message) {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `<p class="error">${esc(message)}</p>`;
-    panel.append(card);
-    scrollDown();
-  }
-</script>
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>

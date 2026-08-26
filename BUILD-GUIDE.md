@@ -19,7 +19,9 @@ browser (MapLibre)  --click lat/lon-->  FastAPI  -->  Strands Agent
 
 Three AWS pieces do the work: **Bedrock** runs the model, **Location Places** answers "what is
 here", and **Location Maps** draws the map. **boto3** is how Python talks to all of them, and
-**Strands** is the framework that turns a model plus some Python functions into an agent.
+**Strands** is the framework that turns a model plus some Python functions into an agent. A
+fifth tool, open web search, fills the gap when Places and Wikipedia don't have what's needed —
+Part 5.5 covers why that one needs a hard usage cap that the other four don't.
 
 ---
 
@@ -323,7 +325,13 @@ agent = Agent(
         temperature=0.2,
         max_tokens=1024,
     ),
-    tools=[reverse_geocode, find_nearby_places, search_wikipedia, read_web_page],
+    tools=[
+        reverse_geocode,
+        find_nearby_places,
+        search_wikipedia,
+        read_web_page,
+        make_search_web(search_session_state()),
+    ],
     system_prompt=SYSTEM_PROMPT,
     callback_handler=None,   # we stream to the UI ourselves, so no console printing
 )
@@ -592,39 +600,167 @@ was missing, and offered the phone number it actually read.
 
 ---
 
+## Part 5.5: a search tool the agent can't overuse
+
+`read_web_page` only works if something already handed the agent a URL. Places and Wikipedia
+cover a lot of that, but not everything: click Grand Central Terminal and ask about Metro-North
+fares, and nothing in the conversation has ever mentioned mta.info. The map data described the
+station; it didn't link to the transit authority's fare page. The agent needs a way to go find
+a URL itself, as a last resort.
+
+Open web search is the right tool for that gap, and also the riskiest one to hand an agent
+without a limit. Every other tool in this project has a predictable cost: one `ReverseGeocode`
+call, one Wikipedia lookup, one page fetch. Search is different — a model that isn't finding
+what it wants will often just try again with a slightly different query, and again, and there
+is no natural stopping point baked into the tool itself. Left unbounded, "search the web if you
+need to" can turn into five or six calls for a single follow-up question.
+
+### Enforce the limit in code, not in the prompt
+
+The instinct is to tell the model "only search twice." That's worth doing, but a system prompt
+is a suggestion, not a constraint — a model can still call the tool a third time if it decides
+the situation warrants it. The budget that actually holds is a plain Python counter, checked
+before the network call ever happens:
+
+```python
+MAX_SEARCHES_PER_SESSION = 2
+
+def make_search_web(budget: dict):
+    @tool
+    def search_web(query: str) -> dict:
+        if budget["remaining"] <= 0:
+            return {"error": "Web search budget for this conversation is used up. ..."}
+        budget["remaining"] -= 1
+        return _cached(("search", query.lower()), lambda: _fetch_web_search(query))
+    return search_web
+```
+
+`make_search_web` is a closure, not a plain `@tool` function like the others. That's the
+mechanism worth taking away from this: the budget has to live somewhere that survives between
+calls but resets between conversations, and a Strands `Agent` already gives you exactly that
+boundary. Each pin gets its own `Agent` in `build_agent()`, so each pin gets its own dict:
+
+```python
+def build_agent() -> Agent:
+    return Agent(
+        ...,
+        tools=[..., make_search_web(search_session_state())],
+    )
+```
+
+Drop a new pin, get a new `Agent`, get a fresh budget. No cross-conversation bookkeeping, no
+database, no TTL to manage — the lifetime of the counter is the lifetime of the object holding
+it, which is a pattern worth reusing anywhere else you need a per-conversation limit.
+
+### Make the fallback actually a fallback
+
+A budget stops runaway cost, but it does nothing if the model reaches for search on every
+question out of habit. That's a prompt problem, and it's explicit here:
+
+```
+- search_web is a last resort ... reach for it only after reverse_geocode,
+  find_nearby_places, search_wikipedia, and read_web_page on any site they gave
+  you have all failed to answer the question. ... Never use it for the first
+  report. When you do use it, make the query specific enough to likely work on
+  the first try, since you only get a couple of tries in this conversation.
+```
+
+Three things are doing work in that instruction. "Last resort" and the explicit list of what to
+try first give the model an ordering, not just a tool name. "Never for the first report" keeps
+search out of the common path entirely — every pin drop gets described from Places and
+Wikipedia alone, and search only shows up on a follow-up that specifically needs it. And telling
+the model it has a limited budget changes its behaviour on the call it does make: it has a
+reason to write a specific query the first time instead of a vague one it plans to refine.
+
+That combination held up in practice. Asked the fare question, the agent used one search to
+find `mta.info/fares-tolls/lirr-metro-north`, read that page, and got a real answer: peak and
+off-peak prices, not a shrug. Asked a *second* fare question in the same conversation, it reused
+the page it had already read rather than spending its last search on a near-duplicate query —
+that second decision came from the model, not the code, which is what "last resort" bought.
+
+### Parsing search results without an API key
+
+DuckDuckGo's HTML endpoint (`html.duckduckgo.com/html/`) returns a normal, unstyled results
+page and needs no API key, unlike most search APIs. Two regular expressions pull out what the
+agent needs:
+
+```python
+_RESULT_LINK_RE = re.compile(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+_RESULT_SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
+```
+
+One wrinkle: the links on that page aren't the real destination, they're DuckDuckGo redirect
+URLs with the actual target base64-free but URL-encoded in a `uddg` query parameter. Decode it,
+then run it through the exact same `_reject_reason` check `read_web_page` uses:
+
+```python
+def _resolve_duckduckgo_link(href: str) -> Optional[str]:
+    parsed = urlparse(href)
+    target = parse_qs(parsed.query).get("uddg", [None])[0]
+    resolved = unquote(target) if target else href
+    return resolved if _reject_reason(resolved) is None else None
+```
+
+Reusing that check matters: search results are exactly as untrusted as anything else on the
+web, and a search engine returning a link to `169.254.169.254` is no less dangerous than the
+model inventing that URL itself. The SSRF guard from Part 5 protects this tool too, for free,
+because both tools call the same function.
+
+---
+
 ## Part 6: wiring it to a browser
 
-FastAPI serves the page and two streaming endpoints. Server-Sent Events (SSE) are a good fit —
-one-directional, plain HTTP, and `EventSource` is built into every browser, no WebSocket needed.
+FastAPI serves the page and two streaming POST endpoints. Server-Sent Events (SSE) remain a good fit for one-directional agent output, but the browser consumes them through streaming `fetch()` rather than native `EventSource`. `EventSource` supports only GET and cannot attach the passcode header, which would force coordinates, questions, and the passcode into URLs.
 
 ```python
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
-@app.get("/api/ask/stream")
-async def ask_stream(session_id: str = Query(...), question: str = Query(...)):
-    return StreamingResponse(
-        _guarded(session, follow_up_prompt(question), structured=False),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+@app.post("/api/ask/stream", dependencies=[Depends(require_passcode)])
+async def ask_stream_post(request: AskRequest):
+    return _ask_stream(request.session_id, request.question)
 ```
 
-The format really is that simple: `event:` line, `data:` line, blank line. On the client:
+The client sends sensitive values in a JSON body and parses the SSE frames from the response stream:
 
 ```javascript
-const source = new EventSource(url);
-source.addEventListener('step',  (ev) => showStep(JSON.parse(ev.data).label));
-source.addEventListener('delta', (ev) => appendText(JSON.parse(ev.data).text));
-source.addEventListener('report', (ev) => renderCard(JSON.parse(ev.data)));
+const response = await fetch('/api/ask/stream', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Demo-Passcode': demoPasscode,
+  },
+  body: JSON.stringify({ session_id: sessionId, question }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+// app.js buffers chunks until the SSE blank-line delimiter, then routes
+// step, delta, report, done, and failed events.
 ```
 
-One thing to watch: Strands' agent calls are blocking. In the non-streaming endpoint, push them
-off the event loop or the whole server stalls:
+An `AbortController` cancels the old response when the user deliberately selects another location. Normal movement never interrupts an agent turn: the browser retains only the newest eligible GPS fix and starts it after the active stream finishes.
+
+One thing to watch: Strands' non-streaming agent calls are blocking. Push them off the event loop or the whole server stalls:
 
 ```python
 result = await asyncio.to_thread(session.agent, prompt, structured_output_model=PlaceReport)
 ```
+
+### Part 6.1: foreground live location
+
+`static/location-tracking.js` wraps `navigator.geolocation.watchPosition()` instead of coupling browser permissions and GPS callbacks directly to UI code. It rejects malformed or stale fixes, exposes explicit start/stop lifecycle methods, and keeps the analysis policy as pure functions that can be tested with Node's built-in test runner.
+
+Live tracking has two rates:
+
+1. Every accepted fix updates the marker, accuracy polygon, bounded trail, and camera locally.
+2. Bedrock analysis runs only for the first accurate fix or after both the movement and time thresholds are met.
+
+The default trigger is at least `max(50 metres, current accuracy)` of movement, at least 15 seconds after the previous analysis, with 75 metres as the normal accuracy ceiling. This prevents stationary GPS jitter from spending money and prevents a moving device from starting overlapping 6–10-second model calls.
+
+The web platform supplies foreground location only. CloudFront HTTPS satisfies iOS Safari's secure-context requirement, but Safari may suspend a page after backgrounding or screen lock. A PWA does not remove that restriction; true background location would require a separate CoreLocation client and a justified iOS background-location entitlement.
+
+Windows development does not require an iOS toolchain. Use Chromium DevTools **Sensors** to override geolocation, then perform the final permission, GPS, and foreground/background checks on a physical iPhone against the CloudFront URL.
 
 ---
 
@@ -657,6 +793,7 @@ Every one of these cost real debugging time.
 | Map is a black screen, console complains about a MIME type | The pinned CDN version does not exist, so the 404 body arrives as `text/plain` | Pin a version that exists, and assert both status and content type in a check script |
 | Bedrock access denied with valid credentials | Model access not enabled | Enable the model in the Bedrock console, then wait a minute |
 | Agent shrugs at prices and opening hours | No tool could read the web | Add a page-reading tool, with the guards in Part 5 |
+| Agent shrugs at a transit station's fares specifically | Places and Wikipedia never link to the transit authority's site, so `read_web_page` had no URL to use | Add a last-resort `search_web` tool, gated to fire only after the others fail (Part 5.5) |
 
 Two habits that prevented worse ones: a `check_map.py` that verifies the browser's whole asset
 chain, and a `smoke_test.py` that drives the real endpoints, including the SSRF guards and a
@@ -675,8 +812,8 @@ Small changes that teach a lot:
   and latency get worse.
 - **Break a tool on purpose.** Return `{"error": ...}` unconditionally and watch the agent
   route around it. This is the payoff for errors-as-data.
-- **Support multiple users.** Sessions are one-at-a-time server-wide. Keying them per browser
-  tab, with expiry, is a genuinely useful exercise.
+- **Expire idle sessions by age.** Conversations are isolated and bounded to the latest 100,
+  but production code should evict by last-access time rather than insertion order.
 - **Read the prompt as code.** Delete the "prefer attractions" line and click the Eiffel Tower.
   Fastest way to feel how much behaviour lives in the system prompt.
 

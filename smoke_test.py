@@ -1,17 +1,20 @@
-"""Exercise the endpoints against a running server: python smoke_test.py"""
+"""Exercise authenticated endpoints against a running server."""
 
 import json
+import os
 import time
 
 import httpx
 
-BASE = "http://127.0.0.1:8000"
+BASE = os.getenv("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+PASSCODE = os.environ.get("DEMO_PASSCODE", "")
+HEADERS = {"X-Demo-Passcode": PASSCODE}
 
 
-def read_sse(url: str, params: dict) -> dict:
-    """Consume one SSE stream, printing steps and collecting the outcome."""
+def read_sse(url: str, body: dict) -> dict:
+    """Consume one POST SSE stream, printing steps and collecting the outcome."""
     outcome: dict = {"text": ""}
-    with httpx.stream("GET", url, params=params, timeout=180) as response:
+    with httpx.stream("POST", url, headers=HEADERS, json=body, timeout=180) as response:
         response.raise_for_status()
         event = None
         for line in response.iter_lines():
@@ -42,7 +45,10 @@ def drop_pin(name: str, lat: float, lon: float) -> str:
 def ask(session_id: str, question: str) -> None:
     started = time.time()
     print(f"\n=== ask: {question} ===")
-    outcome = read_sse(f"{BASE}/api/ask/stream", {"session_id": session_id, "question": question})
+    outcome = read_sse(
+        f"{BASE}/api/ask/stream",
+        {"session_id": session_id, "question": question},
+    )
     if "failed" in outcome:
         print(f"  failed: {outcome['failed']['detail']}")
     else:
@@ -67,31 +73,40 @@ def check_fetch_guards() -> None:
 
 
 if __name__ == "__main__":
+    if not PASSCODE:
+        raise SystemExit("Set DEMO_PASSCODE before running this script")
+
     check_fetch_guards()
     print(f"\nGET / -> {httpx.get(BASE, timeout=30).status_code}")
+    missing = httpx.get(f"{BASE}/api/map-config", timeout=30)
+    wrong = httpx.get(f"{BASE}/api/map-config", headers={"X-Demo-Passcode": "wrong"}, timeout=30)
+    print(f"auth guards -> missing={missing.status_code} wrong={wrong.status_code}")
+    if (missing.status_code, wrong.status_code) != (401, 401):
+        raise SystemExit("Passcode guards did not return 401")
 
-    config = httpx.get(f"{BASE}/api/map-config", timeout=60)
+    config = httpx.get(f"{BASE}/api/map-config", headers=HEADERS, timeout=60)
     summary = {k: v for k, v in config.json().items() if k != "api_key"} if config.is_success else config.text
     print(f"GET /api/map-config -> {config.status_code} {summary} key_present={'api_key' in config.text}")
 
     first = drop_pin("Eiffel Tower", 48.8584, 2.2945)
     ask(first, "How tall is it and when was it built?")
-    ask(first, "What else is worth seeing within a few hundred metres?")
-
-    # A new pin must invalidate the old conversation.
     second = drop_pin("Open Pacific", -30.0, -140.0)
-    stale = httpx.get(
-        f"{BASE}/api/ask/stream",
-        params={"session_id": first, "question": "still there?"},
+    ask(second, "What is the nearest land from here?")
+    ask(first, "Is my first location session still available?")
+
+    get_transport = httpx.get(
+        f"{BASE}/api/describe/stream",
+        headers=HEADERS,
+        params={"latitude": 47.6205, "longitude": -122.3212},
         timeout=30,
     )
-    print(f"\n=== stale session -> {stale.status_code} {stale.json().get('detail')} ===")
-    ask(second, "What is the nearest land from here?")
+    print(f"\n=== removed GET stream -> {get_transport.status_code} ===")
 
-    # A question the map data cannot answer should send the agent to the website.
-    business = drop_pin("NYC Adventure Ebike Tours", 40.76388, -73.98049)
-    ask(business, "How much does it cost to rent a bike here?")
-
-    r = httpx.post(f"{BASE}/api/describe", json={"latitude": 47.6205, "longitude": -122.3212}, timeout=180)
-    print(f"\n=== POST /api/describe -> {r.status_code} ===")
-    print(json.dumps(r.json(), indent=2, ensure_ascii=False))
+    response = httpx.post(
+        f"{BASE}/api/describe",
+        headers=HEADERS,
+        json={"latitude": 47.6205, "longitude": -122.3212},
+        timeout=180,
+    )
+    print(f"\n=== POST /api/describe -> {response.status_code} ===")
+    print(json.dumps(response.json(), indent=2, ensure_ascii=False))

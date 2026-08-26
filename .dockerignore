@@ -1,0 +1,11 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.aws-sam
+blog_images
+.vscode
+.idea
+*.log
