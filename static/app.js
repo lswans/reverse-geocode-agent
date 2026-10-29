@@ -3,6 +3,7 @@ import {
   accuracyCircleGeoJson,
   shouldAnalyzeFix,
 } from '/static/location-tracking.js';
+import { safeHttpUrl } from '/static/safe-url.js';
 
 const EMPTY_FEATURES = { type: 'FeatureCollection', features: [] };
 const MAX_TRAIL_POINTS = 100;
@@ -441,8 +442,9 @@ function addProgressCard(title) {
 }
 
 function addReportCard(report) {
-  const link = report.link
-    ? `<a href="${esc(report.link)}" target="_blank" rel="noopener noreferrer">${esc(report.link_title || report.link)} &rarr;</a>`
+  const href = safeHttpUrl(report.link);
+  const link = href
+    ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(report.link_title || href)} &rarr;</a>`
     : '<span class="hint">No relevant link found.</span>';
   const card = document.createElement('div');
   card.className = 'card';

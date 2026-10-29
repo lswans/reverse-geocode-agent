@@ -3,9 +3,11 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from report_links import safe_link
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
@@ -19,6 +21,11 @@ class PlaceReport(BaseModel):
     longitude: float = Field(description="Longitude that was clicked")
     link: Optional[str] = None
     link_title: Optional[str] = None
+
+    @field_validator("link", mode="before")
+    @classmethod
+    def _only_http_links(cls, value: Any) -> Optional[str]:
+        return safe_link(value)
 
 
 @dataclass

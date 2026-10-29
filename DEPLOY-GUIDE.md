@@ -36,6 +36,15 @@ Upload the frontend to that bucket:
 aws s3 sync static/ s3://<bucket-name-from-output>/ --delete
 ```
 
+Lock the maps key to the CloudFront origin. The key is served to the browser, so this stops a
+copied key from rendering tiles on other sites at your expense. The map stays blank on the
+CloudFront URL until this is done:
+
+```powershell
+$env:ALS_ALLOWED_REFERERS = "<CloudFront URL from output>/*,http://127.0.0.1:8000/*"
+python create_map_key.py --update-restrictions
+```
+
 Open the CloudFront URL and enter the passcode. Verify both interaction modes:
 
 1. Click a pin and confirm the canned report and follow-up response.

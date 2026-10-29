@@ -9,6 +9,9 @@ BASE = os.getenv("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 PASSCODE = os.environ.get("DEMO_PASSCODE", "")
 if not PASSCODE:
     raise SystemExit("Set DEMO_PASSCODE before running this script")
+# The maps key is restricted to referers, so send the page origin the way a
+# browser does (the default referrer policy sends the origin cross-site).
+MAP_HEADERS = {"Referer": f"{BASE}/"}
 
 page = httpx.get(f"{BASE}/", timeout=30)
 page.raise_for_status()
@@ -33,18 +36,18 @@ style_url = (
     f"https://maps.geo.{data['region']}.amazonaws.com/v2/styles/{data['style']}"
     f"/descriptor?key={data['api_key']}&color-scheme={data['color_scheme']}"
 )
-style = httpx.get(style_url, timeout=30)
+style = httpx.get(style_url, headers=MAP_HEADERS, timeout=30)
 print(f"style descriptor -> {style.status_code} {style.json().get('name')}")
 style.raise_for_status()
 
 tile_url = style.json()["sources"]["aws"]["tiles"][0]
 tile_url = tile_url.replace("{z}", "13").replace("{x}", "2411").replace("{y}", "3080")
-tile = httpx.get(tile_url, timeout=30)
+tile = httpx.get(tile_url, headers=MAP_HEADERS, timeout=30)
 print(f"sample tile -> {tile.status_code} {len(tile.content)} bytes")
 
 for suffix in (".png", ".json"):
-    sprite = httpx.get(style.json()["sprite"] + suffix, timeout=30)
+    sprite = httpx.get(style.json()["sprite"] + suffix, headers=MAP_HEADERS, timeout=30)
     print(f"sprite{suffix} -> {sprite.status_code} {len(sprite.content)} bytes")
 
 glyphs = style.json()["glyphs"].replace("{fontstack}", "Amazon%20Ember%20Regular").replace("{range}", "0-255")
-print(f"glyphs -> {httpx.get(glyphs, timeout=30).status_code}")
+print(f"glyphs -> {httpx.get(glyphs, headers=MAP_HEADERS, timeout=30).status_code}")

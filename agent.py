@@ -24,9 +24,11 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import boto3
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from strands import Agent, tool
 from strands.models import BedrockModel
+
+from report_links import safe_link
 
 # Wikimedia requires a User-Agent that includes a way to contact you, and returns
 # 403 without one. Swap in your own project URL or email before running this
@@ -125,8 +127,14 @@ class PlaceReport(BaseModel):
     summary: str = Field(description="Exactly one factual sentence about what is at this location")
     latitude: float = Field(description="Latitude that was clicked")
     longitude: float = Field(description="Longitude that was clicked")
-    link: Optional[str] = Field(default=None, description="Relevant URL about the place, or null")
+    link: Optional[str] = Field(default=None, description="Relevant http(s) URL about the place, or null")
     link_title: Optional[str] = Field(default=None, description="Label for the link, or null")
+
+    # Drop rather than reject: a refused link should not fail the whole report.
+    @field_validator("link", mode="before")
+    @classmethod
+    def _only_http_links(cls, value: Any) -> Optional[str]:
+        return safe_link(value)
 
 
 def _primary_category(item: dict) -> Optional[str]:
@@ -362,29 +370,60 @@ class _TextExtractor(HTMLParser):
         return re.sub(r"\n\s*\n\s*", "\n\n", joined).strip()
 
 
-def _reject_reason(url: str) -> Optional[str]:
-    """Why this URL must not be fetched, or None if it is safe to try.
+def _check_public_url(url: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (reason, None) if this URL must not be fetched, else (None, ip).
 
     The model chooses these URLs, so anything that is not a public web address
     is refused: no other schemes, and nothing that resolves onto this machine or
-    a private network.
+    a private network. The returned ip is the address that passed the check;
+    the caller must connect to it rather than resolving the name again, or a
+    DNS answer that changes between the two lookups could slip past.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return f"Only http and https URLs can be read, got {parsed.scheme or 'no scheme'}."
+        return f"Only http and https URLs can be read, got {parsed.scheme or 'no scheme'}.", None
     if not parsed.hostname:
-        return "That URL has no host."
+        return "That URL has no host.", None
 
     try:
-        resolved = socket.getaddrinfo(parsed.hostname, None)
-    except socket.gaierror:
-        return f"Could not resolve {parsed.hostname}."
+        resolved = socket.getaddrinfo(parsed.hostname, parsed.port or None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError, ValueError):
+        return f"Could not resolve {parsed.hostname}.", None
 
+    addresses = []
     for info in resolved:
         address = ipaddress.ip_address(info[4][0])
         if not address.is_global or address.is_multicast:
-            return f"{parsed.hostname} resolves to a non-public address, refusing to fetch it."
-    return None
+            return f"{parsed.hostname} resolves to a non-public address, refusing to fetch it.", None
+        addresses.append(address)
+    if not addresses:
+        return f"Could not resolve {parsed.hostname}.", None
+    return None, str(addresses[0])
+
+
+def _reject_reason(url: str) -> Optional[str]:
+    """Why this URL must not be fetched, or None if it is safe to try."""
+    return _check_public_url(url)[0]
+
+
+def _pinned_request(url: str, ip: str) -> tuple[str, dict, dict]:
+    """Rewrite url to connect to ip while still presenting the original host.
+
+    Returns (connect_url, extra_headers, extensions). The Host header keeps
+    virtual hosting working, and for https the sni_hostname extension makes
+    TLS send the real name and verify the certificate against it, so pinning
+    the address does not weaken certificate checks.
+    """
+    parsed = urlparse(url)
+    host = f"[{ip}]" if ":" in ip else ip
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    connect_url = parsed._replace(netloc=netloc).geturl()
+
+    host_header = parsed.hostname
+    if parsed.port:
+        host_header = f"{host_header}:{parsed.port}"
+    extensions = {"sni_hostname": parsed.hostname} if parsed.scheme == "https" else {}
+    return connect_url, {"Host": host_header}, extensions
 
 
 @tool
@@ -409,32 +448,39 @@ def _fetch_web_page(url: str) -> dict:
     target = url
     # Redirects are followed by hand so every hop is checked, not just the first.
     for _ in range(MAX_REDIRECTS + 1):
-        reason = _reject_reason(target)
+        reason, ip = _check_public_url(target)
         if reason:
             return {"error": reason}
+        connect_url, pin_headers, extensions = _pinned_request(target, ip)
         try:
-            with httpx.stream(
-                "GET",
-                target,
-                headers={"User-Agent": USER_AGENT, "Accept": "text/html,text/plain"},
-                timeout=HTTP_TIMEOUT,
-                follow_redirects=False,
-            ) as response:
-                location = response.headers.get("location")
-                if response.is_redirect and location:
-                    target = urljoin(target, location)
-                    continue
+            # trust_env=False: an HTTP(S)_PROXY in the environment would resolve
+            # the name itself and undo the pin.
+            with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False, trust_env=False) as client:
+                request = client.build_request(
+                    "GET",
+                    connect_url,
+                    headers={"User-Agent": USER_AGENT, "Accept": "text/html,text/plain", **pin_headers},
+                    extensions=extensions,
+                )
+                response = client.send(request, stream=True)
+                try:
+                    location = response.headers.get("location")
+                    if response.is_redirect and location:
+                        target = urljoin(target, location)
+                        continue
 
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "").split(";")[0].strip()
-                if content_type and content_type not in READABLE_TYPES:
-                    return {"error": f"{target} is {content_type}, not a readable web page."}
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "").split(";")[0].strip()
+                    if content_type and content_type not in READABLE_TYPES:
+                        return {"error": f"{target} is {content_type}, not a readable web page."}
 
-                body = bytearray()
-                for chunk in response.iter_bytes():
-                    body += chunk
-                    if len(body) >= MAX_PAGE_BYTES:
-                        break
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        body += chunk
+                        if len(body) >= MAX_PAGE_BYTES:
+                            break
+                finally:
+                    response.close()
         except httpx.HTTPError as exc:
             return {"error": f"Could not read {target} ({exc})."}
 

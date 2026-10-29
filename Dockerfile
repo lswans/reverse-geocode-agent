@@ -9,7 +9,7 @@ WORKDIR /app
 COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir --requirement requirements.txt
-COPY server.py agent.py agent_stub.py ./
+COPY server.py agent.py agent_stub.py report_links.py ./
 COPY static/ ./static/
 
 EXPOSE 8080

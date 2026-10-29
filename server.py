@@ -4,6 +4,7 @@ import asyncio
 import functools
 import importlib
 import json
+import logging
 import os
 import secrets
 import uuid
@@ -25,8 +26,10 @@ click_prompt = agent_module.click_prompt
 follow_up_prompt = agent_module.follow_up_prompt
 
 app = FastAPI(title="Map Click Agent Demo")
+logger = logging.getLogger("map_click_agent")
 
 MAX_QUESTION_CHARS = 500
+AGENT_FAILED_DETAIL = "The agent could not finish that request. Try again in a moment."
 ALS_API_KEY = os.getenv("ALS_API_KEY")
 ALS_KEY_NAME = os.getenv("ALS_KEY_NAME", "map-click-agent-demo-maps")
 MAP_STYLE = os.getenv("MAP_STYLE", "Standard")
@@ -178,8 +181,11 @@ async def _run(session: Session, prompt: str, structured: bool) -> AsyncIterator
                 yield _sse("report", {"session_id": session.id, "report": report.model_dump()})
             elif not structured:
                 yield _sse("done", {"session_id": session.id})
-    except Exception as exc:
-        yield _sse("failed", {"detail": f"Agent failed: {exc}"})
+    except Exception:
+        # The exception text can carry ARNs, account IDs, or tool internals, so it
+        # goes to the server log only. The client gets a generic message.
+        logger.exception("Agent turn failed for session %s", session.id)
+        yield _sse("failed", {"detail": AGENT_FAILED_DETAIL})
 
 
 async def _guarded(session: Session, prompt: str, structured: bool) -> AsyncIterator[str]:
@@ -238,7 +244,8 @@ async def describe(click: ClickRequest) -> DescribeResponse:
             structured_output_model=PlaceReport,
         )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Agent failed: {exc}") from exc
+        logger.exception("Agent turn failed for session %s", session.id)
+        raise HTTPException(status_code=502, detail=AGENT_FAILED_DETAIL) from exc
     return DescribeResponse(session_id=session.id, report=result.structured_output)
 
 
